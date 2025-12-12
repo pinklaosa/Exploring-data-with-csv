@@ -1,6 +1,6 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useDeferredValue } from 'react';
 import { invoke } from "@tauri-apps/api/core";
-import { ProcessedData, CsvMetadata, SensorMetadata } from '../types';
+import { ProcessedData, CsvMetadata, SensorMetadata, CsvRecord } from '../types';
 import DataTable from './DataTable';
 import Chart from './Chart';
 import FilterPanel from './FilterPanel';
@@ -21,17 +21,15 @@ export default function Dashboard({ metadata, sensorMetadata, onBack }: Dashboar
         [metadata]
     );
 
-    const [selectedSensors, setSelectedSensors] = useState<string[]>(() => {
-        // Default to first 3 sensors if available
-        return sensorHeaders.slice(0, 3);
-    });
+    const [selectedSensors, setSelectedSensors] = useState<string[]>([]);
+    const deferredSensors = useDeferredValue(selectedSensors);
     const [chartData, setChartData] = useState<ProcessedData | null>(null);
     const [loading, setLoading] = useState(false);
 
-    // Fetch data when sensors change
+    // Fetch data when sensors change (using deferred value to debounce/unblock UI)
     useEffect(() => {
         const fetchData = async () => {
-            if (selectedSensors.length === 0) {
+            if (deferredSensors.length === 0) {
                 setChartData({ headers: [], rows: [] });
                 return;
             }
@@ -39,7 +37,7 @@ export default function Dashboard({ metadata, sensorMetadata, onBack }: Dashboar
             setLoading(true);
             try {
                 console.time("invoke_get_data");
-                const data = await invoke<ProcessedData>("get_data", { sensors: selectedSensors });
+                const data = await invoke<ProcessedData>("get_data", { sensors: deferredSensors });
                 console.timeEnd("invoke_get_data");
                 setChartData(data);
             } catch (err) {
@@ -50,29 +48,104 @@ export default function Dashboard({ metadata, sensorMetadata, onBack }: Dashboar
         };
 
         fetchData();
-    }, [selectedSensors]);
+    }, [deferredSensors]);
 
     const [dateRange, setDateRange] = useState<{ start: string, end: string } | null>(null);
     const [chartType, setChartType] = useState<'line' | 'scatter'>('line');
+    const [samplingMethod, setSamplingMethod] = useState<'raw' | 'avg' | 'max' | 'min' | 'first' | 'last'>('raw');
 
     // Filter logic (Client side filtering of the fetched subset)
     const filteredData = useMemo(() => {
         if (!chartData) return [];
-        let res = chartData.rows.filter(r => r.timestamp !== null);
 
+        let rows = chartData.rows.filter(r => r.timestamp !== null);
+
+        // 1. Filter by Date Range first (optimization)
         if (dateRange && dateRange.start && dateRange.end) {
             const start = new Date(dateRange.start).getTime();
             const end = new Date(dateRange.end).getTime();
-            res = res.filter(r => {
+            rows = rows.filter(r => {
                 if (!r.timestamp) return false;
                 const t = new Date(r.timestamp).getTime();
                 return t >= start && t <= end;
             });
         }
 
-        return res;
-    }, [chartData, dateRange]);
+        // 2. Aggregation / Sampling
+        if (samplingMethod === 'raw') {
+            return rows;
+        }
 
+        // helper to get hour key
+        const getHourKey = (ts: string) => {
+            const d = new Date(ts);
+            d.setMinutes(0, 0, 0); // round down to hour
+            return d.toISOString();
+        };
+
+        const grouped = new Map<string, CsvRecord[]>();
+
+        rows.forEach(r => {
+            if (!r.timestamp) return;
+            const key = getHourKey(r.timestamp);
+            if (!grouped.has(key)) {
+                grouped.set(key, []);
+            }
+            grouped.get(key)!.push(r);
+        });
+
+        const aggregated: CsvRecord[] = [];
+        // Map is insertion ordered mostly, but let's sort keys to be safe if needed, 
+        // though usually iterating map keys matches insertion order which follows time if data is sorted.
+        // Data from backend is likely sorted by time.
+
+        for (const [timestamp, groupRows] of grouped) {
+            const newValues: (number | null)[] = [];
+
+            // For each sensor column
+            for (let i = 0; i < chartData.headers.length; i++) {
+                // Should match index of sensorHeaders? No, chartData.headers includes Timestamp usually? 
+                // Wait, chartData.headers from backend likely includes "timestamp" or similar.
+                // Let's check chartData structure.
+                // Actually, ProcessedData usually has headers matching values indices.
+                // values[i] corresponds to headers[i].
+
+                // Extract valid numbers for this column
+                const validValues = groupRows
+                    .map(r => r.values[i])
+                    .filter((v): v is number => v !== null);
+
+                let val: number | null = null;
+
+                if (validValues.length > 0) {
+                    if (samplingMethod === 'avg') {
+                        const sum = validValues.reduce((a, b) => a + b, 0);
+                        val = sum / validValues.length;
+                    } else if (samplingMethod === 'max') {
+                        val = Math.max(...validValues);
+                    } else if (samplingMethod === 'min') {
+                        val = Math.min(...validValues);
+                    } else if (samplingMethod === 'first') {
+                        // First in the group (assuming groupRows is sorted by time)
+                        // We can check the original values too to be safe, but validValues logic above lost indices.
+                        // Re-do specific logic for first/last to respect nulls correctly?
+                        // "First" usually means first existing value or first absolute value?
+                        // Request says: "taking the first value". Let's take the first non-null.
+                        val = validValues[0];
+                    } else if (samplingMethod === 'last') {
+                        val = validValues[validValues.length - 1];
+                    }
+                }
+                newValues.push(val);
+            }
+            aggregated.push({ timestamp, values: newValues });
+        }
+
+        // If aggregation happened, we might want to ensure it's sorted by time again
+        aggregated.sort((a, b) => new Date(a.timestamp!).getTime() - new Date(b.timestamp!).getTime());
+
+        return aggregated;
+    }, [chartData, dateRange, samplingMethod]);
 
 
     return (
@@ -80,6 +153,7 @@ export default function Dashboard({ metadata, sensorMetadata, onBack }: Dashboar
             <div className="top-bar">
                 <FilterPanel
                     onDateRangeChange={(start, end) => setDateRange({ start, end })}
+                    onSamplingChange={setSamplingMethod}
                     onBack={onBack}
                 />
             </div>
@@ -87,7 +161,7 @@ export default function Dashboard({ metadata, sensorMetadata, onBack }: Dashboar
             <div className="dashboard-grid-split">
                 <div className="chart-section-large">
                     <div className="section-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <h3>Sensor Readings • Last 24 Hours • {filteredData.length.toLocaleString()} Points {loading && "(Loading...)"}</h3>
+                        <h3>Sensor Readings • {samplingMethod.toUpperCase()} (1h) • {filteredData.length.toLocaleString()} Points {loading && "(Loading...)"}</h3>
                         <div style={{ display: 'flex', gap: '10px' }}>
                             <button
                                 onClick={() => setChartType('line')}
@@ -123,7 +197,7 @@ export default function Dashboard({ metadata, sensorMetadata, onBack }: Dashboar
                         {chartData && (
                             <Chart
                                 data={filteredData} // Use filteredData which is simplified
-                                sensors={selectedSensors}
+                                sensors={deferredSensors}
                                 headers={chartData.headers}
                                 chartType={chartType}
                             />

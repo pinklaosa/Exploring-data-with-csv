@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, memo } from 'react';
 import ReactECharts from 'echarts-for-react';
 import { CsvRecord } from '../types';
 import 'echarts-gl';
@@ -10,7 +10,7 @@ interface ChartProps {
     chartType?: 'line' | 'scatter';
 }
 
-export default function Chart({ data, sensors, headers, chartType = 'line' }: ChartProps) {
+function Chart({ data, sensors, headers, chartType = 'line' }: ChartProps) {
     const colors = ["#3b82f6", "#10b981", "#6366f1", "#8b5cf6", "#f43f5e", "#f59e0b"];
 
     // State for scatter plot axes
@@ -255,3 +255,5 @@ export default function Chart({ data, sensors, headers, chartType = 'line' }: Ch
         </div>
     );
 }
+
+export default memo(Chart);

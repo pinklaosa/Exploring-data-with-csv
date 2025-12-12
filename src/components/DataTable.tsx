@@ -19,18 +19,17 @@ export default function DataTable({ headers, data }: DataTableProps) {
                 <table>
                     <thead>
                         <tr>
+                            <th>Timestamp</th>
                             {headers.map(h => <th key={h}>{h}</th>)}
                         </tr>
                     </thead>
                     <tbody>
                         {paginatedData.map((row, i) => (
                             <tr key={i}>
-                                {headers.map((h, index) => {
-                                    if (h.toLowerCase() === 'timestamp' || h.toLowerCase() === 'time') {
-                                        return <td key={h}>{row.timestamp}</td>;
-                                    }
-                                    return <td key={h}>{row.values[index] !== null ? row.values[index] : ''}</td>;
-                                })}
+                                <td>{row.timestamp}</td>
+                                {headers.map((h, index) => (
+                                    <td key={h}>{row.values[index] !== null ? row.values[index] : ''}</td>
+                                ))}
                             </tr>
                         ))}
                     </tbody>
