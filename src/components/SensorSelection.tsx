@@ -60,13 +60,6 @@ export default function SensorSelection({
         setSelectedComponents(newSet);
     };
 
-    const toggleAllComponents = () => {
-        if (selectedComponents.size === uniqueComponents.length) {
-            setSelectedComponents(new Set());
-        } else {
-            setSelectedComponents(new Set(uniqueComponents));
-        }
-    };
 
     const filteredSensors = sensors.filter(s => {
         const meta = getMetadata(s);
